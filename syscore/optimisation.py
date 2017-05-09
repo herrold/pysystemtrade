@@ -14,7 +14,7 @@ import random
 from syscore.algos import vol_estimator, mean_estimator
 from syscore.correlations import correlation_single_period, boring_corr_matrix, get_avg_corr
 from syscore.dateutils import generate_fitting_dates, BUSINESS_DAYS_IN_YEAR, WEEKS_IN_YEAR, MONTHS_IN_YEAR
-from syscore.genutils import str2Bool
+from syscore.genutils import str2Bool, progressBar
 from syscore.pdutils import df_from_list, must_have_item
 from syscore.objects import resolve_function
 from syslogdiag.log import logtoscreen
@@ -22,6 +22,7 @@ from syslogdiag.log import logtoscreen
 TARGET_ANN_SR = 0.5
 FLAG_BAD_RETURN = -9999999.9
 
+# FIXME: some pretty horrible code here needs a rethink
 
 class GenericOptimiser(object):
 
@@ -107,10 +108,8 @@ class GenericOptimiser(object):
         setattr(self, "apply_cost_weight", apply_cost_weight)
 
     def need_data(self):
-        if self.method == "equal_weights":
-            return False
-        else:
-            return True
+        self.log.critical("** USED OUT-DATED METHOD NEED_DATA **")
+        # FIXME remove in a couple of releases time
 
     def set_up_data(self, data_gross=None, data_costs=None,
                     weight_matrix=None):
@@ -124,13 +123,7 @@ class GenericOptimiser(object):
         :param data_net: Returns data for costs
         :type data_net: pd.DataFrame or list if pooling
 
-        :param weight_matrix: some weight_matrix, used if equal weights and so don't need returns data
-        :type weight_matrix: pd.DataFrame or list if pooling
-
         """
-        if weight_matrix is not None:
-            setattr(self, "data", weight_matrix.ffill())
-            return None
 
         log = self.log
         frequency = self.frequency
@@ -150,6 +143,8 @@ class GenericOptimiser(object):
         data_gross = df_from_list(data_gross)
         data_costs = df_from_list(data_costs)
 
+        self.unmultiplied_costs = data_costs
+
         # net gross and costs
         if equalise_gross:
             log.terse(
@@ -165,12 +160,27 @@ class GenericOptimiser(object):
 
         setattr(self, "data", data)
 
-    def optimise(self, ann_SR_costs=None):
+
+    def calculate_ann_SR_costs(self):
+        """
+        Must be calculated from costs data without the multiplier, but may be pooled
+
+        :return: float
+        """
+
+        return self.unmultiplied_costs.mean()*self.annualisation
+
+    def optimise(self):
         """
 
         Optimise weights over some returns data
 
+
+
         """
+
+
+
         log = self.log
         date_method = self.date_method
         rollyears = self.rollyears
@@ -193,11 +203,9 @@ class GenericOptimiser(object):
         # create a class object for each period
         opt_results = []
 
-        log.terse("Optimising...")
+        progress=progressBar(len(fit_dates), "Optimising")
 
         for fit_period in fit_dates:
-            log.msg("Optimising for data from %s to %s" %
-                    (str(fit_period.period_start), str(fit_period.period_end)))
             # Do the optimisation for one period, using a particular optimiser
             # instance
             results_this_period = optSinglePeriod(
@@ -215,12 +223,16 @@ class GenericOptimiser(object):
             weight_row = pd.DataFrame(
                 [weights] * 2, index=dindex, columns=data.columns)
             weight_list.append(weight_row)
+            progress.iterate()
 
         # Stack everything up
         raw_weight_df = pd.concat(weight_list, axis=0)
 
         if apply_cost_weight:
             log.terse("Applying cost weighting to optimisation results")
+            # ann_SR_costs must be calculated before a cost multiplier is applied
+            ann_SR_costs = self.calculate_ann_SR_costs()
+
             weight_df = apply_cost_weighting(raw_weight_df, ann_SR_costs)
         else:
             weight_df = raw_weight_df
@@ -329,13 +341,17 @@ def apply_cost_weighting(raw_weight_df, ann_SR_costs):
     # In sample for vol estimation, but shouldn't matter much since target vol
     # should be the same
 
-    avg_cost = np.mean(ann_SR_costs)
-    relative_SR_costs = [cost - avg_cost for cost in ann_SR_costs]
+    ## costs are positive, so convert to returns
+
+    ann_returns = [-cost for cost in ann_SR_costs]
+
+    avg_return = np.mean(ann_returns)
+    relative_SR_returns = [asset_return - avg_return for asset_return in ann_returns]
 
     # Find adjustment factors
     weight_adj = list(
         np.interp(
-            relative_SR_costs,
+            relative_SR_returns,
             adj_factors[0],
             adj_factors[1]))
     weight_adj = np.array([list(weight_adj)] * len(raw_weight_df.index))
